@@ -32,32 +32,60 @@
       height: 100%;
     }
 
-    header {
-      padding: 10px 14px;
-      background: #f7f7f7;
-      border-bottom: 1px solid #ddd;
-      font-size: 16px;
-      font-weight: 600;
-    }
-
+    /* No header anymore – controls sit at the top */
     .controls {
       display: flex;
-      gap: 10px;
+      gap: 8px;
       align-items: center;
       padding: 8px 14px;
       border-bottom: 1px solid #eee;
       font-size: 14px;
       flex-wrap: wrap;
+      background: #f7f7f7;
     }
 
     .controls label {
       font-weight: 500;
     }
 
-    .controls select,
     .controls input {
       padding: 4px 6px;
       font-size: 14px;
+    }
+
+    .zip-search-wrapper {
+      position: relative;
+      display: inline-block;
+      min-width: 150px;
+    }
+
+    .zip-suggestions {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: #ffffff;
+      border: 1px solid #ccc;
+      border-top: none;
+      max-height: 200px;
+      overflow-y: auto;
+      z-index: 1000;
+      font-size: 14px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    }
+
+    .zip-suggestions .suggestion {
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    .zip-suggestions .suggestion:hover {
+      background: #f0f0f0;
+    }
+
+    .zip-suggestions .no-match {
+      padding: 4px 8px;
+      color: #777;
     }
 
     .maps-container {
@@ -102,17 +130,12 @@
 
 <body>
 <div id="app">
-  <header>TEST VERSION – IF YOU SEE THIS, IT’S THE NEW CODE</header>
-
   <div class="controls">
-    <label for="zipSelect">ZIP code list:</label>
-    <select id="zipSelect">
-      <option value="ALL">(All ZIP codes)</option>
-      <!-- JS will populate -->
-    </select>
-
-    <label for="zipSearch">Search ZIP:</label>
-    <input id="zipSearch" type="text" placeholder="Type ZIP (e.g. 10016)" maxlength="5" />
+    <label for="zipSearch">Search ZIP code:</label>
+    <div class="zip-search-wrapper">
+      <input id="zipSearch" type="text" placeholder="Type ZIP (e.g. 10016)" maxlength="5" />
+      <div id="zipSuggestions" class="zip-suggestions"></div>
+    </div>
   </div>
 
   <div class="maps-container">
@@ -149,23 +172,21 @@
   const mapTrees = L.map("mapTrees", { zoomControl: false }).setView(NYC_CENTER, NYC_ZOOM);
   const mapIncome = L.map("mapIncome", { zoomControl: false }).setView(NYC_CENTER, NYC_ZOOM);
 
-  // nice light gray NYC backdrop (Carto Positron)
+  // light gray basemap for both maps
+  const baseLayerOptions = {
+    maxZoom: 18,
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  };
+
   L.tileLayer(
     "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-    {
-      maxZoom: 18,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-    }
+    baseLayerOptions
   ).addTo(mapTrees);
 
   L.tileLayer(
     "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-    {
-      maxZoom: 18,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-    }
+    baseLayerOptions
   ).addTo(mapIncome);
 
   let geojsonLayerTrees;
@@ -173,6 +194,7 @@
   let dataByZip = {};
   let treeColorScale, incomeColorScale;
   let selectedZip = null; // currently highlighted ZIP
+  let allZips = [];
 
   Promise.all([
     d3.json("nyc_zipcodes.geojson"),
@@ -182,7 +204,7 @@
   .catch(err => console.error("Error loading data:", err));
 
   function initMaps([geojson, csvData]) {
-    // Build lookup from CSV (using your column names)
+    // Build lookup from CSV
     dataByZip = {};
     csvData.forEach(d => {
       const zip = d.postcode ? d.postcode.toString().padStart(5, "0") : null;
@@ -200,11 +222,14 @@
       };
     });
 
-    const treeValues = Object.values(dataByZip)
-      .map(d => d.treesPer100)
+    allZips = Object.keys(dataByZip).sort();
+    setupZipSearch();
+
+    const treeValues = allZips
+      .map(z => dataByZip[z].treesPer100)
       .filter(v => !isNaN(v));
-    const incomeValues = Object.values(dataByZip)
-      .map(d => d.medianIncome)
+    const incomeValues = allZips
+      .map(z => dataByZip[z].medianIncome)
       .filter(v => !isNaN(v));
 
     const treeExtent = d3.extent(treeValues);
@@ -221,8 +246,6 @@
     incomeColorScale = d3.scaleSequential()
       .domain(incomeExtent)
       .interpolator(pinkInterp);
-
-    populateZipDropdown();
 
     geojsonLayerTrees = L.geoJSON(geojson, {
       style: styleTrees,
@@ -349,86 +372,109 @@
         const zip = getZipFromFeature(feature);
         if (!zip) return;
 
-        const select = document.getElementById("zipSelect");
-
-        // If clicking same ZIP again → unselect & zoom out
+        const input = document.getElementById("zipSearch");
         if (selectedZip === zip) {
+          // clicking same ZIP again → unselect & zoom out
           selectedZip = null;
-          select.value = "ALL";
+          if (input) input.value = "";
+          clearSuggestions();
           resetView();
         } else {
-          select.value = zip;
-          zoomToZip(zip); // zoomToZip will set selectedZip
+          if (input) input.value = zip;
+          clearSuggestions();
+          zoomToZip(zip);
         }
       }
     });
   }
 
-  // ---------- DROPDOWN & SEARCH ----------
-  function populateZipDropdown() {
-    const select = document.getElementById("zipSelect");
-    const zips = Object.keys(dataByZip).sort();
-    zips.forEach(zip => {
-      const opt = document.createElement("option");
-      opt.value = zip;
-      opt.textContent = zip;
-      select.appendChild(opt);
-    });
+  // ---------- SEARCH UI ----------
+  function setupZipSearch() {
+    const input = document.getElementById("zipSearch");
+    const suggestions = document.getElementById("zipSuggestions");
 
-    select.addEventListener("change", () => {
-      const value = select.value;
-      if (value === "ALL") {
+    function renderSuggestions(matches) {
+      if (!matches.length) {
+        suggestions.innerHTML = '<div class="no-match">No matches</div>';
+        return;
+      }
+      suggestions.innerHTML = matches
+        .map(z => `<div class="suggestion" data-zip="${z}">${z}</div>`)
+        .join("");
+    }
+
+    input.addEventListener("input", () => {
+      const term = input.value.trim();
+      if (!term) {
+        clearSuggestions();
         selectedZip = null;
         resetView();
+        return;
+      }
+      const matches = allZips.filter(z => z.includes(term));
+      renderSuggestions(matches);
+    });
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        const val = input.value.trim();
+        if (!val) {
+          selectedZip = null;
+          clearSuggestions();
+          resetView();
+          return;
+        }
+        if (allZips.includes(val)) {
+          clearSuggestions();
+          if (selectedZip === val) {
+            selectedZip = null;
+            input.value = "";
+            resetView();
+          } else {
+            zoomToZip(val);
+          }
+        }
+      }
+    });
+
+    suggestions.addEventListener("click", (e) => {
+      const div = e.target.closest(".suggestion");
+      if (!div) return;
+      const zip = div.dataset.zip;
+      if (!zip) return;
+
+      if (input) input.value = zip;
+      clearSuggestions();
+
+      if (selectedZip === zip) {
+        selectedZip = null;
+        input.value = "";
+        resetView();
       } else {
-        zoomToZip(value);
+        zoomToZip(zip);
       }
     });
 
-    setupZipSearch();
-  }
-
-  function setupZipSearch() {
-    const searchInput = document.getElementById("zipSearch");
-    const select = document.getElementById("zipSelect");
-
-    // Filter dropdown options as you type
-    searchInput.addEventListener("input", () => {
-      const term = searchInput.value.trim();
-      for (let i = 0; i < select.options.length; i++) {
-        const opt = select.options[i];
-        if (opt.value === "ALL") continue;
-        opt.hidden = term && !opt.value.includes(term);
-      }
-    });
-
-    // When user types full ZIP and presses Enter / leaves field
-    searchInput.addEventListener("change", () => {
-      const val = searchInput.value.trim();
-      if (!val) return;
-      const opt = Array.from(select.options).find(o => o.value === val);
-      if (opt) {
-        select.value = val;
-        zoomToZip(val);
+    // Click outside closes suggestions
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".zip-search-wrapper")) {
+        clearSuggestions();
       }
     });
   }
 
+  function clearSuggestions() {
+    const suggestions = document.getElementById("zipSuggestions");
+    if (suggestions) suggestions.innerHTML = "";
+  }
+
+  // ---------- VIEW / ZOOM ----------
   function resetView() {
     mapTrees.setView(NYC_CENTER, NYC_ZOOM);
     mapIncome.setView(NYC_CENTER, NYC_ZOOM);
 
     if (geojsonLayerTrees) geojsonLayerTrees.setStyle(styleTrees);
     if (geojsonLayerIncome) geojsonLayerIncome.setStyle(styleIncome);
-
-    const select = document.getElementById("zipSelect");
-    const searchInput = document.getElementById("zipSearch");
-    if (searchInput) searchInput.value = "";
-    if (select) {
-      for (let i = 0; i < select.options.length; i++) {
-        select.options[i].hidden = false;
-      }
-    }
   }
 
   function zoomToZip(zip) {
@@ -449,9 +495,8 @@
     mapTrees.fitBounds(bounds, options);
     mapIncome.fitBounds(bounds, options);
 
-    // re-style to apply highlight
-    geojsonLayerTrees.setStyle(styleTrees);
-    geojsonLayerIncome.setStyle(styleIncome);
+    if (geojsonLayerTrees) geojsonLayerTrees.setStyle(styleTrees);
+    if (geojsonLayerIncome) geojsonLayerIncome.setStyle(styleIncome);
   }
 </script>
 </body>
