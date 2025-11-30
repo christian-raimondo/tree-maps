@@ -169,8 +169,12 @@
     return raw.toString().padStart(5, "0");
   }
 
-  const mapTrees = L.map("mapTrees", { zoomControl: false }).setView(NYC_CENTER, NYC_ZOOM);
-  const mapIncome = L.map("mapIncome", { zoomControl: false }).setView(NYC_CENTER, NYC_ZOOM);
+  const mapTrees = L.map("mapTrees", { zoomControl: false, attributionControl: false })
+  .setView(NYC_CENTER, NYC_ZOOM);
+
+  const mapIncome = L.map("mapIncome", { zoomControl: false, attributionControl: false })
+  .setView(NYC_CENTER, NYC_ZOOM);
+
 
   // light gray basemap for both maps
   const baseLayerOptions = {
