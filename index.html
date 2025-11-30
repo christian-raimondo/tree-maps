@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>NYC Trees & Income by ZIP</title>
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    header {
+      padding: 10px 14px;
+      background: #f7f7f7;
+      border-bottom: 1px solid #ddd;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 14px;
+      border-bottom: 1px solid #eee;
+      font-size: 14px;
+    }
+
+    .controls label {
+      font-weight: 500;
+    }
+
+    .controls select {
+      padding: 4px 6px;
+      font-size: 14px;
+    }
+
+    .maps-container {
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+      min-height: 0;
+    }
+
+    .map-wrapper {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid #ddd;
+    }
+
+    .map-wrapper:first-child {
+      border-left: none;
+    }
+
+    .map-title {
+      text-align: center;
+      font-weight: 600;
+      font-size: 14px;
+      padding: 6px 4px;
+      background: #f9f9f9;
+      border-bottom: 1px solid #eee;
+    }
+
+    .map {
+      flex: 1;
+    }
+
+    .leaflet-tooltip h4 {
+      margin: 0 0 4px 0;
+      font-size: 14px;
+    }
+
+    .leaflet-tooltip p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.3;
+    }
+  </style>
+</head>
+
+<body>
+<div id="app">
+  <header>Tree Density & Income by ZIP Code (NYC)</header>
+
+  <div class="controls">
+    <label for="zipSelect">Find your ZIP code:</label>
+    <select id="zipSelect">
+      <option value="ALL">(All ZIP codes)</option>
+      <!-- JS will populate -->
+    </select>
+  </div>
+
+  <div class="maps-container">
+    <div class="map-wrapper">
+      <div class="map-title">Map of Amount of Trees per 100 Residents in Each ZIP Code</div>
+      <div id="mapTrees" class="map"></div>
+    </div>
+    <div class="map-wrapper">
+      <div class="map-title">Map of Median Household Income in Each ZIP Code</div>
+      <div id="mapIncome" class="map"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Leaflet JS -->
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin=""
+></script>
+
+<!-- d3 for CSV + color scales -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+
+<script>
+  // ---------- BASIC CONFIG ----------
+  const NYC_CENTER = [40.7128, -74.0060];
+  const NYC_ZOOM = 10;
+
+  // In your nyc_zipcodes.geojson the ZIP field is "postalCode"
+  function getZipFromFeature(feature) {
+    const raw = feature?.properties?.postalCode;
+    if (raw == null) return null;
+    return raw.toString().padStart(5, "0");
+  }
+
+  const mapTrees = L.map("mapTrees").setView(NYC_CENTER, NYC_ZOOM);
+  const mapIncome = L.map("mapIncome").setView(NYC_CENTER, NYC_ZOOM);
+
+  const osmTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: "&copy; OpenStreetMap contributors",
+  });
+  osmTiles.addTo(mapTrees);
+  osmTiles.addTo(mapIncome);
+
+  let geojsonLayerTrees;
+  let geojsonLayerIncome;
+  let dataByZip = {};
+  let treeColorScale, incomeColorScale;
+
+  // ---------- LOAD YOUR FILES ----------
+  Promise.all([
+    d3.json("nyc_zipcodes.geojson"),
+    d3.csv("Tree Data Per Zip.csv")  // <- uses your exact filename
+  ])
+  .then(initMaps)
+  .catch(err => console.error("Error loading data:", err));
+
+  function initMaps([geojson, csvData]) {
+    // Build lookup with your column names
+    dataByZip = {};
+    csvData.forEach(d => {
+      // "postcode" column in your CSV
+      const zip = d.postcode ? d.postcode.toString().padStart(5, "0") : null;
+      if (!zip) return;
+
+      dataByZip[zip] = {
+        zip,
+        treesPer100: +d["Trees per 100 Residents"],
+        treeCount: +d["Tree Count"],
+        population: +d["Population"],
+        medianIncome: +d["Median Income"],
+        goodPct: d["Percent good"] ? +d["Percent good"] : null,
+        fairPct: d["Percent fair"] ? +d["Percent fair"] : null,
+        poorPct: d["Percent poor"] ? +d["Percent poor"] : null,
+      };
+    });
+
+    // Build color scales from actual values
+    const treeValues = Object.values(dataByZip)
+      .map(d => d.treesPer100)
+      .filter(v => !isNaN(v));
+    const incomeValues = Object.values(dataByZip)
+      .map(d => d.medianIncome)
+      .filter(v => !isNaN(v));
+
+    const treeExtent = d3.extent(treeValues);
+    const incomeExtent = d3.extent(incomeValues);
+
+    treeColorScale = d3.scaleSequential()
+      .domain(treeExtent)
+      .interpolator(d3.interpolateGreens);
+
+    const pinkStart = d3.rgb("#fde0dd");
+    const pinkEnd = d3.rgb("#c51b8a");
+    const pinkInterp = d3.interpolate(pinkStart, pinkEnd);
+
+    incomeColorScale = d3.scaleSequential()
+      .domain(incomeExtent)
+      .interpolator(pinkInterp);
+
+    populateZipDropdown();
+
+    // Create the two map layers
+    geojsonLayerTrees = L.geoJSON(geojson, {
+      style: styleTrees,
+      onEachFeature: (feature, layer) => {
+        attachTooltip(feature, layer);
+        attachHoverInteractions(layer, "trees");
+      }
+    }).addTo(mapTrees);
+
+    geojsonLayerIncome = L.geoJSON(geojson, {
+      style: styleIncome,
+      onEachFeature: (feature, layer) => {
+        attachTooltip(feature, layer);
+        attachHoverInteractions(layer, "income");
+      }
+    }).addTo(mapIncome);
+
+    const bounds = geojsonLayerTrees.getBounds();
+    mapTrees.fitBounds(bounds);
+    mapIncome.fitBounds(bounds);
+  }
+
+  // ---------- STYLES ----------
+  function styleBase(feature, variant) {
+    const zip = getZipFromFeature(feature);
+    const d = zip && dataByZip[zip];
+
+    let fillColor = "#cccccc"; // gray for no data
+    if (d) {
+      if (variant === "trees" && treeColorScale) {
+        fillColor = treeColorScale(d.treesPer100);
+      }
+      if (variant === "income" && incomeColorScale) {
+        fillColor = incomeColorScale(d.medianIncome);
+      }
+    }
+
+    return {
+      weight: 1,
+      opacity: 1,
+      color: "#444",
+      fillOpacity: 0.8,
+      fillColor
+    };
+  }
+
+  function styleTrees(feature) {
+    return styleBase(feature, "trees");
+  }
+
+  function styleIncome(feature) {
+    return styleBase(feature, "income");
+  }
+
+  // ---------- TOOLTIP ----------
+  function attachTooltip(feature, layer) {
+    const zip = getZipFromFeature(feature);
+    const d = zip && dataByZip[zip];
+
+    if (!d) {
+      layer.bindTooltip(`<h4>ZIP Code: ${zip || "Unknown"}</h4><p>No data</p>`, {
+        sticky: true
+      });
+      return;
+    }
+
+    const numFmt = d3.format(",.0f");
+    const incomeFmt = d3.format(",.0f");
+    const oneDec = d3.format(".1f");
+
+    const html = `
+      <h4>ZIP Code: ${d.zip}</h4>
+      <p>
+        Trees per 100 Residents: <strong>${oneDec(d.treesPer100)}</strong><br/>
+        Number of Trees: <strong>${numFmt(d.treeCount)}</strong><br/>
+        Population: <strong>${numFmt(d.population)}</strong><br/>
+        Median Household Income: <strong>$${incomeFmt(d.medianIncome)}</strong><br/>
+        ${d.goodPct != null ? `Trees in Good Health: <strong>${oneDec(d.goodPct)}%</strong><br/>` : ""}
+        ${d.fairPct != null ? `Trees in Fair Health: <strong>${oneDec(d.fairPct)}%</strong><br/>` : ""}
+        ${d.poorPct != null ? `Trees in Poor Health: <strong>${oneDec(d.poorPct)}%</strong>` : ""}
+      </p>
+    `;
+
+    layer.bindTooltip(html, { sticky: true, direction: "auto" });
+  }
+
+  // ---------- HOVER + CLICK ----------
+  function attachHoverInteractions(layer, variant) {
+    layer.on({
+      mouseover: function (e) {
+        const l = e.target;
+        l.setStyle({
+          weight: 2,
+          color: "#000",
+          fillOpacity: 0.9
+        });
+        if (!L.Browser.ie && !L.Browser.opera && !L.Browser.edge) {
+          l.bringToFront();
+        }
+      },
+      mouseout: function (e) {
+        if (variant === "trees" && geojsonLayerTrees) {
+          geojsonLayerTrees.resetStyle(e.target);
+        } else if (geojsonLayerIncome) {
+          geojsonLayerIncome.resetStyle(e.target);
+        }
+      },
+      click: function (e) {
+        const feature = e.target.feature;
+        const zip = getZipFromFeature(feature);
+        if (zip) {
+          const select = document.getElementById("zipSelect");
+          select.value = zip;
+          zoomToZip(zip);
+        }
+      }
+    });
+  }
+
+  // ---------- DROPDOWN + ZOOM ----------
+  function populateZipDropdown() {
+    const select = document.getElementById("zipSelect");
+    const zips = Object.keys(dataByZip).sort();
+    zips.forEach(zip => {
+      const opt = document.createElement("option");
+      opt.value = zip;
+      opt.textContent = zip;
+      select.appendChild(opt);
+    });
+
+    select.addEventListener("change", () => {
+      const value = select.value;
+      if (value === "ALL") {
+        resetView();
+      } else {
+        zoomToZip(value);
+      }
+    });
+  }
+
+  function resetView() {
+    mapTrees.setView(NYC_CENTER, NYC_ZOOM);
+    mapIncome.setView(NYC_CENTER, NYC_ZOOM);
+  }
+
+  function zoomToZip(zip) {
+    if (!geojsonLayerTrees) return;
+
+    let targetLayer = null;
+    geojsonLayerTrees.eachLayer(layer => {
+      const fZip = getZipFromFeature(layer.feature);
+      if (fZip === zip) targetLayer = layer;
+    });
+
+    if (!targetLayer) return;
+
+    const bounds = targetLayer.getBounds();
+    const options = { maxZoom: 13, padding: [10, 10] };
+    mapTrees.fitBounds(bounds, options);
+    mapIncome.fitBounds(bounds, options);
+  }
+</script>
+</body>
+</html>
