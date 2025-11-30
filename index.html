@@ -32,7 +32,7 @@
       height: 100%;
     }
 
-    /* No header anymore – controls sit at the top */
+    /* Top controls only, no title */
     .controls {
       display: flex;
       gap: 8px;
@@ -125,6 +125,11 @@
       font-size: 12px;
       line-height: 1.3;
     }
+
+    /* hide Leaflet attribution */
+    .leaflet-control-attribution {
+      display: none !important;
+    }
   </style>
 </head>
 
@@ -160,27 +165,26 @@
 
 <script>
   const NYC_CENTER = [40.7128, -74.0060];
-  const NYC_ZOOM = 10;
+  const NYC_ZOOM = 9; // used if fullBounds isn't ready yet
 
-  // ZIP field from your GeoJSON
   function getZipFromFeature(feature) {
     const raw = feature?.properties?.postalCode;
     if (raw == null) return null;
     return raw.toString().padStart(5, "0");
   }
 
-  const mapTrees = L.map("mapTrees", { zoomControl: false, attributionControl: false })
-  .setView(NYC_CENTER, NYC_ZOOM);
+  const mapTrees = L.map("mapTrees", {
+    zoomControl: false,
+    attributionControl: false
+  }).setView(NYC_CENTER, NYC_ZOOM);
 
-  const mapIncome = L.map("mapIncome", { zoomControl: false, attributionControl: false })
-  .setView(NYC_CENTER, NYC_ZOOM);
+  const mapIncome = L.map("mapIncome", {
+    zoomControl: false,
+    attributionControl: false
+  }).setView(NYC_CENTER, NYC_ZOOM);
 
-
-  // light gray basemap for both maps
   const baseLayerOptions = {
-    maxZoom: 18,
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    maxZoom: 18
   };
 
   L.tileLayer(
@@ -195,20 +199,21 @@
 
   let geojsonLayerTrees;
   let geojsonLayerIncome;
+  let fullBounds = null;   // <-- we'll store the full NYC bounds here
+
   let dataByZip = {};
   let treeColorScale, incomeColorScale;
-  let selectedZip = null; // currently highlighted ZIP
+  let selectedZip = null;
   let allZips = [];
 
   Promise.all([
     d3.json("nyc_zipcodes.geojson"),
     d3.csv("Tree Data Per Zip.csv")
   ])
-  .then(initMaps)
-  .catch(err => console.error("Error loading data:", err));
+    .then(initMaps)
+    .catch(err => console.error("Error loading data:", err));
 
   function initMaps([geojson, csvData]) {
-    // Build lookup from CSV
     dataByZip = {};
     csvData.forEach(d => {
       const zip = d.postcode ? d.postcode.toString().padStart(5, "0") : null;
@@ -222,7 +227,7 @@
         medianIncome: +d["Median Income"],
         goodPct: d["Percent good"] ? +d["Percent good"] : null,
         fairPct: d["Percent fair"] ? +d["Percent fair"] : null,
-        poorPct: d["Percent poor"] ? +d["Percent poor"] : null,
+        poorPct: d["Percent poor"] ? +d["Percent poor"] : null
       };
     });
 
@@ -239,7 +244,8 @@
     const treeExtent = d3.extent(treeValues);
     const incomeExtent = d3.extent(incomeValues);
 
-    treeColorScale = d3.scaleSequential()
+    treeColorScale = d3
+      .scaleSequential()
       .domain(treeExtent)
       .interpolator(d3.interpolateGreens);
 
@@ -247,7 +253,8 @@
     const pinkEnd = d3.rgb("#c51b8a");
     const pinkInterp = d3.interpolate(pinkStart, pinkEnd);
 
-    incomeColorScale = d3.scaleSequential()
+    incomeColorScale = d3
+      .scaleSequential()
       .domain(incomeExtent)
       .interpolator(pinkInterp);
 
@@ -267,9 +274,16 @@
       }
     }).addTo(mapIncome);
 
-    const bounds = geojsonLayerTrees.getBounds();
-    mapTrees.fitBounds(bounds);
-    mapIncome.fitBounds(bounds);
+    // compute the full NYC bounds ONCE and reuse
+    fullBounds = geojsonLayerTrees.getBounds();
+    resetView();
+
+    // make sure maps size correctly if container changes
+    setTimeout(() => {
+      mapTrees.invalidateSize();
+      mapIncome.invalidateSize();
+      resetView();
+    }, 300);
   }
 
   // ---------- STYLES & HIGHLIGHT ----------
@@ -312,9 +326,10 @@
     const d = zip && dataByZip[zip];
 
     if (!d) {
-      layer.bindTooltip(`<h4>ZIP Code: ${zip || "Unknown"}</h4><p>No data</p>`, {
-        sticky: true
-      });
+      layer.bindTooltip(
+        `<h4>ZIP Code: ${zip || "Unknown"}</h4><p>No data</p>`,
+        { sticky: true }
+      );
       return;
     }
 
@@ -325,7 +340,6 @@
     let html;
 
     if (variant === "trees") {
-      // Tree map: NO median income line
       html = `
         <h4>ZIP Code: ${d.zip}</h4>
         <p>
@@ -338,7 +352,6 @@
         </p>
       `;
     } else {
-      // Income map: ONLY median income
       html = `
         <h4>ZIP Code: ${d.zip}</h4>
         <p>
@@ -378,7 +391,7 @@
 
         const input = document.getElementById("zipSearch");
         if (selectedZip === zip) {
-          // clicking same ZIP again → unselect & zoom out
+          // clicking same ZIP again -> unselect & zoom all the way back out
           selectedZip = null;
           if (input) input.value = "";
           clearSuggestions();
@@ -459,7 +472,6 @@
       }
     });
 
-    // Click outside closes suggestions
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".zip-search-wrapper")) {
         clearSuggestions();
@@ -474,8 +486,15 @@
 
   // ---------- VIEW / ZOOM ----------
   function resetView() {
-    mapTrees.setView(NYC_CENTER, NYC_ZOOM);
-    mapIncome.setView(NYC_CENTER, NYC_ZOOM);
+    if (fullBounds) {
+      // zoom to full NYC bounds (all ZIPs)
+      mapTrees.fitBounds(fullBounds);
+      mapIncome.fitBounds(fullBounds);
+    } else {
+      // fallback if bounds not ready yet
+      mapTrees.setView(NYC_CENTER, NYC_ZOOM);
+      mapIncome.setView(NYC_CENTER, NYC_ZOOM);
+    }
 
     if (geojsonLayerTrees) geojsonLayerTrees.setStyle(styleTrees);
     if (geojsonLayerIncome) geojsonLayerIncome.setStyle(styleIncome);
