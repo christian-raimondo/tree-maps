@@ -47,13 +47,15 @@
       padding: 8px 14px;
       border-bottom: 1px solid #eee;
       font-size: 14px;
+      flex-wrap: wrap;
     }
 
     .controls label {
       font-weight: 500;
     }
 
-    .controls select {
+    .controls select,
+    .controls input {
       padding: 4px 6px;
       font-size: 14px;
     }
@@ -78,14 +80,8 @@
 
     .map {
       flex: 1;
-      background: #f5f5f5; /* plain background */
     }
 
-    .leaflet-container {
-      background: #f5f5f5 !important;
-    }
-
-    /* Tooltip styling with PT Serif */
     .leaflet-tooltip {
       font-family: "PT Serif", serif;
     }
@@ -109,11 +105,14 @@
   <header>Tree Density & Income by ZIP Code (NYC)</header>
 
   <div class="controls">
-    <label for="zipSelect">Find your ZIP code:</label>
+    <label for="zipSelect">ZIP code list:</label>
     <select id="zipSelect">
       <option value="ALL">(All ZIP codes)</option>
       <!-- JS will populate -->
     </select>
+
+    <label for="zipSearch">Search ZIP:</label>
+    <input id="zipSearch" type="text" placeholder="Type ZIP (e.g. 10016)" maxlength="5" />
   </div>
 
   <div class="maps-container">
@@ -140,7 +139,7 @@
   const NYC_CENTER = [40.7128, -74.0060];
   const NYC_ZOOM = 10;
 
-  // ZIP field in your GeoJSON
+  // ZIP field from your GeoJSON
   function getZipFromFeature(feature) {
     const raw = feature?.properties?.postalCode;
     if (raw == null) return null;
@@ -150,11 +149,30 @@
   const mapTrees = L.map("mapTrees", { zoomControl: false }).setView(NYC_CENTER, NYC_ZOOM);
   const mapIncome = L.map("mapIncome", { zoomControl: false }).setView(NYC_CENTER, NYC_ZOOM);
 
+  // nice light gray NYC backdrop (Carto Positron)
+  L.tileLayer(
+    "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+    {
+      maxZoom: 18,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    }
+  ).addTo(mapTrees);
+
+  L.tileLayer(
+    "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+    {
+      maxZoom: 18,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    }
+  ).addTo(mapIncome);
+
   let geojsonLayerTrees;
   let geojsonLayerIncome;
   let dataByZip = {};
   let treeColorScale, incomeColorScale;
-  let selectedZip = null; // for highlighting
+  let selectedZip = null; // currently highlighted ZIP
 
   Promise.all([
     d3.json("nyc_zipcodes.geojson"),
@@ -164,7 +182,7 @@
   .catch(err => console.error("Error loading data:", err));
 
   function initMaps([geojson, csvData]) {
-    // Build lookup from CSV
+    // Build lookup from CSV (using your column names)
     dataByZip = {};
     csvData.forEach(d => {
       const zip = d.postcode ? d.postcode.toString().padStart(5, "0") : null;
@@ -206,7 +224,6 @@
 
     populateZipDropdown();
 
-    // Create layers
     geojsonLayerTrees = L.geoJSON(geojson, {
       style: styleTrees,
       onEachFeature: (feature, layer) => {
@@ -243,12 +260,11 @@
       }
     }
 
-    // Highlight selected ZIP, fade others
     const isSelected = !selectedZip || zip === selectedZip;
 
     return {
-      weight: isSelected ? 1.5 : 0.5,
-      opacity: isSelected ? 1 : 0.4,
+      weight: isSelected ? 1.5 : 0.7,
+      opacity: isSelected ? 1 : 0.3,
       color: isSelected ? "#333" : "#aaaaaa",
       fillOpacity: isSelected ? 0.85 : 0.15,
       fillColor
@@ -282,21 +298,20 @@
     let html;
 
     if (variant === "trees") {
-      // FULL tooltip for tree map
+      // Tree map: NO median income line
       html = `
         <h4>ZIP Code: ${d.zip}</h4>
         <p>
           Trees per 100 Residents: <strong>${oneDec(d.treesPer100)}</strong><br/>
           Number of Trees: <strong>${numFmt(d.treeCount)}</strong><br/>
           Population: <strong>${numFmt(d.population)}</strong><br/>
-          Median Household Income: <strong>$${incomeFmt(d.medianIncome)}</strong><br/>
           ${d.goodPct != null ? `Trees in Good Health: <strong>${oneDec(d.goodPct)}%</strong><br/>` : ""}
           ${d.fairPct != null ? `Trees in Fair Health: <strong>${oneDec(d.fairPct)}%</strong><br/>` : ""}
           ${d.poorPct != null ? `Trees in Poor Health: <strong>${oneDec(d.poorPct)}%</strong>` : ""}
         </p>
       `;
     } else {
-      // SIMPLIFIED tooltip for income map
+      // Income map: ONLY median income
       html = `
         <h4>ZIP Code: ${d.zip}</h4>
         <p>
@@ -323,7 +338,6 @@
         }
       },
       mouseout: function (e) {
-        // reset style according to current selectedZip
         if (variant === "trees" && geojsonLayerTrees) {
           geojsonLayerTrees.resetStyle(e.target);
         } else if (geojsonLayerIncome) {
@@ -333,16 +347,24 @@
       click: function (e) {
         const feature = e.target.feature;
         const zip = getZipFromFeature(feature);
-        if (zip) {
-          const select = document.getElementById("zipSelect");
+        if (!zip) return;
+
+        const select = document.getElementById("zipSelect");
+
+        // If clicking same ZIP again → unselect & zoom out
+        if (selectedZip === zip) {
+          selectedZip = null;
+          select.value = "ALL";
+          resetView();
+        } else {
           select.value = zip;
-          zoomToZip(zip);
+          zoomToZip(zip); // zoomToZip will set selectedZip
         }
       }
     });
   }
 
-  // ---------- DROPDOWN + ZOOM / HIGHLIGHT ----------
+  // ---------- DROPDOWN & SEARCH ----------
   function populateZipDropdown() {
     const select = document.getElementById("zipSelect");
     const zips = Object.keys(dataByZip).sort();
@@ -356,19 +378,57 @@
     select.addEventListener("change", () => {
       const value = select.value;
       if (value === "ALL") {
+        selectedZip = null;
         resetView();
       } else {
         zoomToZip(value);
       }
     });
+
+    setupZipSearch();
+  }
+
+  function setupZipSearch() {
+    const searchInput = document.getElementById("zipSearch");
+    const select = document.getElementById("zipSelect");
+
+    // Filter dropdown options as you type
+    searchInput.addEventListener("input", () => {
+      const term = searchInput.value.trim();
+      for (let i = 0; i < select.options.length; i++) {
+        const opt = select.options[i];
+        if (opt.value === "ALL") continue;
+        opt.hidden = term && !opt.value.includes(term);
+      }
+    });
+
+    // When user types full ZIP and presses Enter / leaves field
+    searchInput.addEventListener("change", () => {
+      const val = searchInput.value.trim();
+      if (!val) return;
+      const opt = Array.from(select.options).find(o => o.value === val);
+      if (opt) {
+        select.value = val;
+        zoomToZip(val);
+      }
+    });
   }
 
   function resetView() {
-    selectedZip = null;
     mapTrees.setView(NYC_CENTER, NYC_ZOOM);
     mapIncome.setView(NYC_CENTER, NYC_ZOOM);
+
     if (geojsonLayerTrees) geojsonLayerTrees.setStyle(styleTrees);
     if (geojsonLayerIncome) geojsonLayerIncome.setStyle(styleIncome);
+
+    const select = document.getElementById("zipSelect");
+    const searchInput = document.getElementById("zipSearch");
+    if (searchInput) searchInput.value = "";
+    if (select) {
+      for (let i = 0; i < select.options.length; i++) {
+        select.options[i].hidden = false;
+      }
+    }
   }
 
   function zoomToZip(zip) {
