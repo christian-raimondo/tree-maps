@@ -33,7 +33,14 @@
   font-weight: 700;
   margin: 0;
   padding: 16px 0 10px 0;
-  background: #ffffff; /* <-- THIS fixes the problem */
+  background: #ffffff !important;   /* force white */
+  display: block;
+}
+
+    #app,
+.maps-container,
+.map-wrapper {
+  background: #ffffff !important;   /* force white for the whole map area */
 }
 
     #app {
